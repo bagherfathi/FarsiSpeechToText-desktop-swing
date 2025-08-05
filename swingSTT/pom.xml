@@ -7,48 +7,100 @@
     <version>1.0-SNAPSHOT</version>
 
     <properties>
-        <maven.compiler.source>11</maven.compiler.source>
-        <maven.compiler.target>11</maven.compiler.target>
+        <maven.compiler.source>18</maven.compiler.source>
+        <maven.compiler.target>18</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <vosk.version>0.3.45</vosk.version>
+        <jna.version>5.7.0</jna.version>
+        <exec.mainClass>com.example.SpeechToTextApp</exec.mainClass>
+        <launch4j.outfile>target/Chalabi_SpeechToText.exe</launch4j.outfile>
+        <launch4j.jar>target/${project.artifactId}-${project.version}.jar</launch4j.jar>
     </properties>
 
     <dependencies>
-        <!-- Vosk Java API -->
         <dependency>
             <groupId>com.alphacephei</groupId>
             <artifactId>vosk</artifactId>
-            <version>0.3.45</version>
+            <version>${vosk.version}</version>
         </dependency>
         <dependency>
-            <groupId>org.json</groupId>
-            <artifactId>json</artifactId>
-            <version>20231013</version>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+            <version>${jna.version}</version>
         </dependency>
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-            <version>2.17.1</version>
-        </dependency>
-        <!-- JavaMail API -->
         <dependency>
             <groupId>com.sun.mail</groupId>
             <artifactId>javax.mail</artifactId>
             <version>1.6.2</version>
         </dependency>
-        <!-- JavaBeans Activation Framework (JAF) -->
         <dependency>
             <groupId>com.sun.activation</groupId>
             <artifactId>javax.activation</artifactId>
             <version>1.2.0</version>
         </dependency>
+        <dependency>
+            <groupId>javax.activation</groupId>
+            <artifactId>activation</artifactId>
+            <version>1.1</version>
+        </dependency>
     </dependencies>
 
     <build>
         <plugins>
-            <!-- Maven Shade Plugin for fat JAR -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <source>${maven.compiler.source}</source>
+                    <target>${maven.compiler.target}</target>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.3.1</version>
+                <configuration>
+                    <encoding>${project.build.sourceEncoding}</encoding>
+                    <nonFilteredFileExtensions>
+                        <nonFilteredFileExtension>mdl</nonFilteredFileExtension>
+                        <nonFilteredFileExtension>bin</nonFilteredFileExtension>
+                        <nonFilteredFileExtension>conf</nonFilteredFileExtension>
+                        <nonFilteredFileExtension>txt</nonFilteredFileExtension>
+                        <nonFilteredFileExtension>fst</nonFilteredFileExtension>
+                        <nonFilteredFileExtension>ie</nonFilteredFileExtension>
+                        <nonFilteredFileExtension>mat</nonFilteredFileExtension>
+                        <nonFilteredFileExtension>stats</nonFilteredFileExtension>
+                    </nonFilteredFileExtensions>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.6.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-dependencies</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>copy-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/lib</outputDirectory>
+                            <overWriteReleases>false</overWriteReleases>
+                            <overWriteSnapshots>false</overWriteSnapshots>
+                            <overWriteIfNewer>true</overWriteIfNewer>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
-                <version>3.5.0</version>
+                <version>3.6.0</version>
                 <executions>
                     <execution>
                         <phase>package</phase>
@@ -58,33 +110,67 @@
                         <configuration>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>com.example.SpeechToTextApp</mainClass>
-                                </transformer>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.IncludeResourceTransformer">
-                                    <resource>META-INF/lib</resource>
+                                    <mainClass>${exec.mainClass}</mainClass>
                                 </transformer>
                             </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
                         </configuration>
                     </execution>
                 </executions>
             </plugin>
-            <!-- Maven Resources Plugin -->
+
             <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-resources-plugin</artifactId>
-                <version>3.3.1</version>
-                <configuration>
-                    <encoding>UTF-8</encoding>
-                </configuration>
+                <groupId>com.akathist.maven.plugins.launch4j</groupId>
+                <artifactId>launch4j-maven-plugin</artifactId>
+                <version>2.5.1</version>
+                <executions>
+                    <execution>
+                        <id>l4j-gui</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>launch4j</goal>
+                        </goals>
+                        <configuration>
+                            <headerType>gui</headerType>
+                            <outfile>${launch4j.outfile}</outfile>
+                            <jar>${launch4j.jar}</jar>
+                            <errTitle>Chalabi Error</errTitle>
+                            <jre>
+                                <path>jre</path>
+                                <bundledJre64Bit>true</bundledJre64Bit>
+                                <minVersion>18.0.0</minVersion>
+                                <maxVersion></maxVersion>
+                                <initialHeapSize>512</initialHeapSize>
+                                <maxHeapSize>1024</maxHeapSize>
+                                <opts>
+                                    <opt>-Dfile.encoding=UTF-8</opt>
+                                </opts>
+                            </jre>
+                            <versionInfo>
+                                <fileVersion>1.0.0.0</fileVersion>
+                                <txtFileVersion>1.0</txtFileVersion>
+                                <fileDescription>Chalabi Speech to Text Software</fileDescription>
+                                <copyright>Copyright 2025</copyright>
+                                <productVersion>1.0.0.0</productVersion>
+                                <txtProductVersion>1.0</txtProductVersion>
+                                <productName>Chalabi Speech to Text</productName>
+                                <internalName>SpeechToText</internalName>
+                                <originalFilename>Chalabi_SpeechToText.exe</originalFilename>
+                            </versionInfo>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
-        <resources>
-            <resource>
-                <directory>src/main/resources</directory>
-                <includes>
-                    <include>**/*</include>
-                </includes>
-            </resource>
-        </resources>
+        <finalName>${project.artifactId}-${project.version}</finalName>
     </build>
 </project>
