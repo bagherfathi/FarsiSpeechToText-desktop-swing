@@ -16,42 +16,6 @@
         </configuration>
       </plugin>
       <plugin>
-        <artifactId>maven-resources-plugin</artifactId>
-        <version>3.3.1</version>
-        <configuration>
-          <encoding>${project.build.sourceEncoding}</encoding>
-          <nonFilteredFileExtensions>
-            <nonFilteredFileExtension>mdl</nonFilteredFileExtension>
-            <nonFilteredFileExtension>bin</nonFilteredFileExtension>
-            <nonFilteredFileExtension>conf</nonFilteredFileExtension>
-            <nonFilteredFileExtension>txt</nonFilteredFileExtension>
-            <nonFilteredFileExtension>fst</nonFilteredFileExtension>
-            <nonFilteredFileExtension>ie</nonFilteredFileExtension>
-            <nonFilteredFileExtension>mat</nonFilteredFileExtension>
-            <nonFilteredFileExtension>stats</nonFilteredFileExtension>
-          </nonFilteredFileExtensions>
-        </configuration>
-      </plugin>
-      <plugin>
-        <artifactId>maven-dependency-plugin</artifactId>
-        <version>3.6.1</version>
-        <executions>
-          <execution>
-            <id>copy-dependencies</id>
-            <phase>package</phase>
-            <goals>
-              <goal>copy-dependencies</goal>
-            </goals>
-            <configuration>
-              <outputDirectory>${project.build.directory}/lib</outputDirectory>
-              <overWriteReleases>false</overWriteReleases>
-              <overWriteSnapshots>false</overWriteSnapshots>
-              <overWriteIfNewer>true</overWriteIfNewer>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
         <artifactId>maven-shade-plugin</artifactId>
         <version>3.6.0</version>
         <executions>
@@ -118,6 +82,26 @@
                 <internalName>SpeechToText</internalName>
                 <originalFilename>Chalabi_SpeechToText.exe</originalFilename>
               </versionInfo>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>3.1.0</version>
+        <executions>
+          <execution>
+            <id>copy-jre</id>
+            <phase>package</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <target>
+                <copy>
+                  <fileset />
+                </copy>
+              </target>
             </configuration>
           </execution>
         </executions>
