@@ -304,6 +304,9 @@ public class SpeechToTextApp extends JFrame {
         String modelPath = tempDir.resolve(modelName).toString();
         voskModel = new Model(modelPath);
         recognizer = new Recognizer(voskModel, 16000.0f);
+        recognizer.setWords(true);
+        recognizer.setMaxAlternatives(0);
+        recognizer.setPartialWords(true);
     }
 
     private void changeModel() {
@@ -629,9 +632,12 @@ public class SpeechToTextApp extends JFrame {
                 }
 
                 line.start();
-
+//                recognizer.reset();   // clears lattice, adaptation, everything → stays fast for hours
                 if (voskModel != null) {
                     recognizer = new Recognizer(voskModel, 16000.0f);
+                    recognizer.setWords(true);
+                    recognizer.setMaxAlternatives(0);
+                    recognizer.setPartialWords(true);
                 }
 
                 byte[] buffer = new byte[2048];
