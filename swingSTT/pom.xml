@@ -8,8 +8,8 @@
     <version>1.0-SNAPSHOT</version>
 
     <properties>
-        <maven.compiler.source>21</maven.compiler.source>
-        <maven.compiler.target>21</maven.compiler.target>
+        <maven.compiler.source>18</maven.compiler.source>
+        <maven.compiler.target>18</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <vosk.version>0.3.45</vosk.version>
         <jna.version>5.7.0</jna.version>
@@ -19,6 +19,9 @@
     </properties>
 
     <dependencies>
+        <dependency>
+            <groupId>com.sun.mail</groupId><artifactId>javax.mail</artifactId><version>1.6.2</version>
+        </dependency>
         <dependency>
             <groupId>com.alphacephei</groupId>
             <artifactId>vosk</artifactId>
@@ -30,31 +33,31 @@
             <version>${jna.version}</version>
         </dependency>
         <dependency>
-            <groupId>com.sun.mail</groupId>
-            <artifactId>javax.mail</artifactId>
-            <version>1.6.2</version>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.11.0</version>
         </dependency>
         <dependency>
-            <groupId>com.sun.activation</groupId>
-            <artifactId>javax.activation</artifactId>
-            <version>1.2.0</version>
-        </dependency>
-        <dependency>
-            <groupId>javax.activation</groupId>
-            <artifactId>activation</artifactId>
-            <version>1.1</version>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>4.13.2</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
     <build>
+        <resources><resource><directory>src/main/resources</directory><excludes><exclude>model/**</exclude></excludes></resource></resources>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.4.2</version>
+                <configuration><excludes><exclude>model/**</exclude></excludes></configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
                 <configuration>
-                    <source>${maven.compiler.source}</source>
-                    <target>${maven.compiler.target}</target>
+                    <release>18</release>
                 </configuration>
             </plugin>
             <plugin>
@@ -68,6 +71,7 @@
                             <goal>shade</goal>
                         </goals>
                         <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>${exec.mainClass}</mainClass>
@@ -87,6 +91,14 @@
                     </execution>
                 </executions>
             </plugin>
+        </plugins>
+        <finalName>${project.artifactId}-${project.version}</finalName>
+    </build>
+    <profiles>
+        <profile>
+            <id>windows-dist</id>
+            <activation><os><family>Windows</family></os></activation>
+            <build><plugins>
             <plugin>
                 <groupId>com.akathist.maven.plugins.launch4j</groupId>
                 <artifactId>launch4j-maven-plugin</artifactId>
@@ -143,7 +155,7 @@
                         <configuration>
                             <target>
                                 <copy todir="${project.build.directory}/jre">
-                                    <fileset dir="${project.basedir}/jre"/>
+                                    <fileset dir="${project.basedir}/JRE"/>
                                 </copy>
                             </target>
                         </configuration>
@@ -156,6 +168,10 @@
                         </goals>
                         <configuration>
                             <target>
+                                <copy todir="${project.build.directory}/model">
+                                    <fileset dir="${project.basedir}/src/main/resources/model"/>
+                                </copy>
+                                <copy file="${project.basedir}/chalabi.properties.example" todir="${project.build.directory}"/>
                                 <copy todir="${project.build.directory}/tools">
                                     <fileset dir="${project.basedir}/tools"/>
                                 </copy>
@@ -164,7 +180,7 @@
                     </execution>
                 </executions>
             </plugin>
-        </plugins>
-        <finalName>${project.artifactId}-${project.version}</finalName>
-    </build>
+            </plugins></build>
+        </profile>
+    </profiles>
 </project>

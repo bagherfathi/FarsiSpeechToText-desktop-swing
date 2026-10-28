@@ -31,3 +31,22 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+chalabi.properties
+.chalabi/
+benchmark-results/
+
+# Large local runtime, speech models and third-party binaries
+/JRE/
+/jre/
+/tools/
+/src/main/resources/model/
+# Local credentials bundled into this installation only
+/src/main/resources/smtp-defaults.properties
+# Generated state and Maven output
+/dependency-reduced-pom.xml
+/transcription_counter.dat
+/outbox/
+/recordings/
+# Locally generated brochures
+/*.docx

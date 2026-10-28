@@ -1,0 +1,23 @@
+# Copy to chalabi.properties beside your working directory, or pass -Dchalabi.config=/path/to/file.
+# Java properties paths must use / or doubled backslashes. Do not commit your local config.
+models.dir=src/main/resources/model
+# Optional override; otherwise bundled tools or PATH is used.
+ffmpeg.executable=
+ffmpeg.timeout.seconds=1800
+# whisper-cli from ggml-org/whisper.cpp; a multilingual ggml model (not .en).
+whisper.executable=
+whisper.model=
+whisper.timeout.seconds=1800
+# Existing SMTP setup is preserved in the app; uploads are enabled by default.
+# No configuration or environment variable is needed for the original email delivery.
+# Optional overrides only: do not add blank smtp.* keys, which would override working defaults.
+upload.enabled=true
+# smtp.host=your.alternate.server
+# smtp.port=587
+# smtp.user=alternate.account
+# smtp.from=alternate.sender
+# smtp.to=alternate.recipient
+# smtp.password.env=CHALABI_SMTP_PASSWORD
+# Base64/MIME increases total email size. Oversized jobs stay in outbox for retry.
+upload.max.media.bytes=18000000
+# data.dir defaults to user.home/.chalabi; successful uploads delete their outbox copy.
